@@ -3,202 +3,259 @@ from tkinter import ttk, filedialog, messagebox
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib as mpl
 from mpl_toolkits.mplot3d import Axes3D
-import matplotlib.patches as mpatches
-# --- Container Specifications (mm) ---
+import itertools
+from collections import Counter
+
+# --- Container Constants (mm) ---
 CONTAINERS = {
-    "20GP": {"L": 5898, "W": 2352, "H": 2393, "MAX_WT": 28000},
-    "40GP": {"L": 12032, "W": 2352, "H": 2393, "MAX_WT": 30480},
-    "40HC": {"L": 12032, "W": 2352, "H": 2698, "MAX_WT": 30480}
+    "20GP": {"L": 5898, "W": 2352, "H": 2393},
+    "40GP": {"L": 12032, "W": 2352, "H": 2393},
+    "40HC": {"L": 12032, "W": 2352, "H": 2698}
 }
 
 class Item:
-    def __init__(self, sku, l, w, h, wt):
+    def __init__(self, sku, l, w, h):
         self.sku = sku
-        self.dims = sorted([l, w, h], reverse=True) # Standardize orientation
-        self.wt = wt
+        self.dims = [l, w, h]
+        self.vol = l * w * h
         self.pos = [0, 0, 0]
-        self.current_dims = [l, w, h]
+        self.curr_dims = [l, w, h]
 
-class Packer:
-    def __init__(self, container_dims):
-        self.L, self.W, self.H = container_dims
-        self.placed_items = []
-        self.unplaced_items = []
+class OptimizationEngine:
+    def __init__(self, c_dims):
+        self.L, self.W, self.H = c_dims
+        self.placed = []
+        self.unplaced = []
 
-    def fits(self, x, y, z, l, w, h):
-        """Check if item fits in container and doesn't collide with others."""
+    def intersects(self, x, y, z, l, w, h):
         if x + l > self.L or y + w > self.W or z + h > self.H:
-            return False
-        for item in self.placed_items:
-            ix, iy, iz = item.pos
-            il, iw, ih = item.current_dims
-            if not (x + l <= ix or x >= ix + il or
-                    y + w <= iy or y >= iy + iw or
-                    z + h <= iz or z >= iz + ih):
-                return False
-        return True
+            return True
+        for p in self.placed:
+            px, py, pz = p.pos
+            pl, pw, ph = p.curr_dims
+            if not (x + l <= px or x >= px + pl or 
+                    y + w <= py or y >= py + pw or 
+                    z + h <= pz or z >= pz + ph):
+                return True
+        return False
 
     def pack(self, items):
-        # Sort items by volume (Largest first for best density)
-        items.sort(key=lambda x: x.dims[0]*x.dims[1]*x.dims[2], reverse=True)
-        
+        items.sort(key=lambda x: x.vol, reverse=True)
         for item in items:
-            placed = False
-            # Search for first available (x,y,z) point using a step-based grid
-            # For 95%+ precision, we check every placement point created by previous items
-            potential_points = [[0, 0, 0]]
-            for p in self.placed_items:
-                potential_points.append([p.pos[0] + p.current_dims[0], p.pos[1], p.pos[2]])
-                potential_points.append([p.pos[0], p.pos[1] + p.current_dims[1], p.pos[2]])
-                potential_points.append([p.pos[0], p.pos[1], p.pos[2] + p.current_dims[2]])
+            best_pt = None
+            best_dims = None
+            min_score = float('inf')
 
-            # Sort points to fill from back-bottom-left
-            potential_points.sort(key=lambda p: (p[2], p[1], p[0]))
+            pts = [[0, 0, 0]]
+            for p in self.placed:
+                pts.append([p.pos[0] + p.curr_dims[0], p.pos[1], p.pos[2]])
+                pts.append([p.pos[0], p.pos[1] + p.curr_dims[1], p.pos[2]])
+                pts.append([p.pos[0], p.pos[1], p.pos[2] + p.curr_dims[2]])
 
-            for pt in potential_points:
-                x, y, z = pt
-                # Try all 6 rotations
-                import itertools
-                for dims in set(itertools.permutations(item.dims)):
-                    l, w, h = dims
-                    if self.fits(x, y, z, l, w, h):
-                        item.pos = [x, y, z]
-                        item.current_dims = [l, w, h]
-                        self.placed_items.append(item)
-                        placed = True
-                        break
-                if placed: break
-            
-            if not placed:
-                self.unplaced_items.append(item)
+            pts.sort(key=lambda p: (p[2], p[0], p[1]))
 
-# --- GUI Application ---
-class App:
+            for pt in pts:
+                # Pallet Logic: Only 2 horizontal rotations (keep height vertical)
+                orientations = [(item.dims[0], item.dims[1], item.dims[2]),
+                               (item.dims[1], item.dims[0], item.dims[2])]
+                
+                for dims in orientations:
+                    if not self.intersects(pt[0], pt[1], pt[2], dims[0], dims[1], dims[2]):
+                        score = pt[0] + pt[1] + pt[2]
+                        if score < min_score:
+                            min_score = score
+                            best_pt, best_dims = pt, dims
+                if best_pt: break
+
+            if best_pt:
+                item.pos, item.curr_dims = best_pt, best_dims
+                self.placed.append(item)
+            else:
+                self.unplaced.append(item)
+
+class ProfessionalApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("95% Efficiency Container Optimizer")
-        self.items_list = []
+        self.root.title("LogiSmart  - EDC")
+        self.root.geometry("1300x850")
+        self.items_data = []
+        self.packer = None
+        
+        self.setup_styles()
         self.create_widgets()
+        
+    def setup_styles(self):
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        self.style.configure("Header.TLabel", font=("Segoe UI", 12, "bold"))
+        self.style.configure("Stat.TLabel", font=("Consolas", 10))
 
     def create_widgets(self):
-        frame = ttk.Frame(self.root, padding="20")
-        frame.pack()
+        # Top Control Bar
+        ctrl = ttk.Frame(self.root, padding=10)
+        ctrl.pack(side=tk.TOP, fill=tk.X)
 
-        self.cont_var = tk.StringVar(value="40GP")
-        ttk.Label(frame, text="Select Container:").grid(row=0, column=0)
-        ttk.Combobox(frame, textvariable=self.cont_var, values=list(CONTAINERS.keys())).grid(row=0, column=1)
+        ttk.Label(ctrl, text="Container:").pack(side=tk.LEFT, padx=5)
+        self.c_var = tk.StringVar(value="40GP")
+        ttk.Combobox(ctrl, textvariable=self.c_var, values=list(CONTAINERS.keys()), width=10).pack(side=tk.LEFT, padx=5)
 
-        ttk.Button(frame, text="Load Excel", command=self.load_excel).grid(row=1, column=0, columnspan=2, pady=10)
-        ttk.Button(frame, text="Calculate & View 3D", command=self.optimize).grid(row=2, column=0, columnspan=2)
+        ttk.Button(ctrl, text="Upload Excel", command=self.upload).pack(side=tk.LEFT, padx=10)
+        ttk.Button(ctrl, text="Calculate Layout", command=self.run).pack(side=tk.LEFT)
 
-    def load_excel(self):
+        # Main Content Area
+        main_frame = ttk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Left side: 3D Visualization
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+
+        self.tab1 = ttk.Frame(self.notebook); self.notebook.add(self.tab1, text="Isometric View")
+        self.tab2 = ttk.Frame(self.notebook); self.notebook.add(self.tab2, text="Top View")
+
+        # Right side: SKU Summary Panel
+        self.side_panel = ttk.LabelFrame(main_frame, text=" Packing Summary ", padding=10)
+        self.side_panel.pack(side=tk.RIGHT, fill=tk.Y, padx=10, pady=5)
+        
+        self.summary_text = tk.Text(self.side_panel, width=30, height=20, font=("Consolas", 10), state='disabled', bg="#f0f0f0")
+        self.summary_text.pack(fill=tk.BOTH, expand=True)
+
+    def upload(self):
         path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
-        if not path: return
-        df = pd.read_excel(path)
-        self.items_list = []
-        for _, r in df.iterrows():
-            for _ in range(int(r['Quantity'])):
-                # Adjusting units: assuming Excel is CM, converting to MM
-                self.items_list.append(Item(r['SKU'], r['Length']*10, r['Width']*10, r['Height']*10, r['Weight']))
-        messagebox.showinfo("Ready", f"Loaded {len(self.items_list)} boxes.")
-
-    def optimize(self):
-        if not self.items_list:
+        if not path:
             return
 
-        c_info = CONTAINERS[self.cont_var.get()]
-        c_dims = (c_info['L'], c_info['W'], c_info['H'])
-        packer = Packer(c_dims)
-        packer.pack(self.items_list)
+        df = pd.read_excel(path)
 
-        # Utilization Calculation
-        used_vol = sum(i.current_dims[0]*i.current_dims[1]*i.current_dims[2] for i in packer.placed_items)
-        total_vol = c_dims[0] * c_dims[1] * c_dims[2]
-        util = (used_vol / total_vol) * 100
+        self.items_data = []
 
-        # --- Visualizing the Container as a Boundary ---
-        fig = plt.figure(figsize=(14, 8))
+        for idx, r in df.iterrows():
+            # Use row number as SKU (since no SKU column)
+            sku = f"Pallet_{idx+1}"
+
+            length = float(r['Length']) * 10   # cm → mm
+            width  = float(r['Width']) * 10
+            height = float(r['Height']) * 10
+
+            self.items_data.append(Item(sku, length, width, height))
+
+        messagebox.showinfo("Ready", f"Loaded {len(self.items_data)} pallets.")
+
+        self.update_summary(initial=True)
+    def update_summary(self, initial=False):
+        self.summary_text.config(state='normal')
+        self.summary_text.delete('1.0', tk.END)
+
+        # ✅ ALWAYS show loaded items
+        counts = Counter([i.sku for i in self.items_data])
+
+        self.summary_text.insert(tk.END, "ITEMS LOADED:\n")
+        self.summary_text.insert(tk.END, "-"*30 + "\n")
+        for sku, count in sorted(counts.items()):
+            self.summary_text.insert(tk.END, f"SKU {sku}: {count} units\n")
+
+        # ✅ If optimization done → show results ALSO
+        if self.packer:
+            placed_counts = Counter([i.sku for i in self.packer.placed])
+            failed_counts = Counter([i.sku for i in self.packer.unplaced])
+
+            self.summary_text.insert(tk.END, "\n\nOPTIMIZATION RESULT\n")
+            self.summary_text.insert(tk.END, "="*30 + "\n")
+
+            self.summary_text.insert(tk.END, f"Container   : {self.c_var.get()}\n")
+            self.summary_text.insert(tk.END, f"Total Items : {self.total_items}\n")
+            self.summary_text.insert(tk.END, f"Placed      : {self.placed_items}\n")
+            self.summary_text.insert(tk.END, f"Failed      : {self.failed_items}\n")
+            self.summary_text.insert(tk.END, f"Utilization : {self.utilization:.2f}%\n")
+
+            self.summary_text.insert(tk.END, "="*30 + "\n\n")
+
+            self.summary_text.insert(tk.END, "SKU BREAKDOWN\n")
+            self.summary_text.insert(tk.END, "-"*30 + "\n")
+
+            all_skus = sorted(set(list(placed_counts.keys()) + list(failed_counts.keys())))
+
+            for sku in all_skus:
+                p = placed_counts.get(sku, 0)
+                f = failed_counts.get(sku, 0)
+                self.summary_text.insert(
+                    tk.END,
+                    f"SKU {sku}\n  ✔ Placed : {p}\n  ❌ Failed : {f}\n" + "-"*20 + "\n"
+                )
+
+        self.summary_text.config(state='disabled')
+    def run(self):
+            if not self.items_data:
+                messagebox.showwarning("Warning", "Please upload data first!")
+                return
+
+            c_info = CONTAINERS[self.c_var.get()]
+            self.packer = OptimizationEngine((c_info['L'], c_info['W'], c_info['H']))
+
+            # Fresh copy
+            items_to_pack = [Item(i.sku, i.dims[0], i.dims[1], i.dims[2]) for i in self.items_data]
+            self.packer.pack(items_to_pack)
+
+            total = len(items_to_pack)
+            placed = len(self.packer.placed)
+            failed = len(self.packer.unplaced)
+
+            utilization = (sum(i.vol for i in self.packer.placed) / 
+                        (c_info['L'] * c_info['W'] * c_info['H'])) * 100
+
+            # 👉 PRINT IN TERMINAL
+            print("\n========== OPTIMIZATION RESULT ==========")
+            print(f"Container: {self.c_var.get()}")
+            print(f"Total Items: {total}")
+            print(f"Placed: {placed}")
+            print(f"Unplaced: {failed}")
+            print(f"Utilization: {utilization:.2f}%")
+            print("=========================================\n")
+            # Draw charts + summary
+            # ✅ STORE FIRST
+            self.total_items = total
+            self.placed_items = placed
+            self.failed_items = failed
+            self.utilization = utilization
+
+            # ✅ THEN UPDATE UI
+            self.draw_all_views(c_info)
+            self.update_summary()
+    def draw_all_views(self, c):
+        for tab in [self.tab1, self.tab2]:
+            for w in tab.winfo_children(): w.destroy()
+        self.create_plot(self.tab1, c, 25, -60, "Isometric View")
+        self.create_plot(self.tab2, c, 90, -90, "Floor Plan View")
+
+    def create_plot(self, frame, c, elev, azim, title):
+        fig = plt.Figure(figsize=(7, 5))
         ax = fig.add_subplot(111, projection='3d')
-
-        # 1. Plot the "Container Box" (very faint/transparent)
-        # This draws a very faint wireframe box around the entire boundary
-        x_corners = [0, c_dims[0], c_dims[0], 0, 0, 0, c_dims[0], c_dims[0], 0, c_dims[0]]
-        y_corners = [0, 0, c_dims[1], c_dims[1], 0, 0, 0, c_dims[1], c_dims[1], c_dims[1]]
-        z_corners = [0, 0, 0, 0, 0, c_dims[2], c_dims[2], c_dims[2], c_dims[2], c_dims[2]]
         
-        # Plot container boundary as a gray, dotted wireframe
-        ax.plot3D(x_corners, y_corners, z_corners, color='gray', linestyle='--', alpha=0.3)
+        # Container Outline
+        ax.plot3D([0, c['L'], c['L'], 0, 0], [0, 0, c['W'], c['W'], 0], [0, 0, 0, 0, 0], color='gray', alpha=0.5)
         
-        # Optional: Plot the container floor as a subtle translucent plane
-        # this helps anchor the items.
-        floor_vertices = [np.array([0, 0, 0]), np.array([c_dims[0], 0, 0]), 
-                          np.array([c_dims[0], c_dims[1], 0]), np.array([0, c_dims[1], 0])]
-        # poly = plt.Poly3DCollection([floor_vertices], alpha=0.05, color='gray')
-        # ax.add_collection3d(poly)
+        skus = sorted(list(set(i.sku for i in self.packer.placed)))
+        # Updated Color Logic to avoid Deprecation Warning
+        cmap = mpl.colormaps['tab10'].resampled(len(skus)) if skus else None
 
-        # 2. Plot the placed items (solid boxes with edge lines)
-        unique_skus = list(set(i.sku for i in packer.placed_items))
-        # Use a qualitative colormap (like 'Set3' or 'Paired') for distinct colors per SKU
-        colors = plt.cm.get_cmap('Set3', len(unique_skus))
-        sku_color_map = {sku: colors(i) for i, sku in enumerate(unique_skus)}
-
-        # Keep track of colors for the legend
-        seen_skus = set()
-        legend_patches = []
-
-        for i in packer.placed_items:
-            # We add black edge lines to make individual boxes stand out, 
-            # while keeping the faces translucent (alpha) for visibility.
-            c = sku_color_map[i.sku]
+        for i in self.packer.placed:
+            color = cmap(skus.index(i.sku)) if cmap else 'blue'
             ax.bar3d(i.pos[0], i.pos[1], i.pos[2], 
-                     i.current_dims[0], i.current_dims[1], i.current_dims[2], 
-                     color=c, edgecolor='black', linewidth=0.5, alpha=0.7)
-            
-            # Create a legend entry if we haven't seen this SKU color yet
-            if i.sku not in seen_skus:
-                patch = mpatches.Patch(color=c, label=i.sku)
-                legend_patches.append(patch)
-                seen_skus.add(i.sku)
+                     i.curr_dims[0], i.curr_dims[1], i.curr_dims[2], 
+                     color=color, edgecolor='black', alpha=0.7, linewidth=0.3)
 
-        # 3. Add Legend
-        ax.legend(handles=legend_patches, loc='upper right', title="SKUs")
-
-        # 4. Configure the view (matching the prompt image's perspective)
-        # We need an angled overhead view. Adjust elev/azim if needed.
-        ax.view_init(elev=25, azim=-60)
-        ax.set_box_aspect(c_dims)  # Crucial for proper geometric scaling (long container)
-
-        # 5. Add text result and title
-        ax.set_title(f"3D Container Packing: {self.cont_var.get()}\n"
-                     f"Utilization: {util:.2f}% | Placed: {len(packer.placed_items)} | Unplaced: {len(packer.unplaced_items)}", fontsize=12)
-
-        ax.set_xlabel('Length (mm)', fontsize=10)
-        ax.set_ylabel('Width (mm)', fontsize=10)
-        ax.set_zlabel('Height (mm)', fontsize=10)
-
-        plt.tight_layout()
-        plt.show()
-
-    def plot_3d(self, packer, c, util):
-        fig = plt.figure(figsize=(12, 7))
-        ax = fig.add_subplot(111, projection='3d')
+        ax.set_box_aspect((c['L'], c['W'], c['H']))
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_zlim(0, c['H']) # Critical for seeing height differences
         
-        # Color map for SKUs
-        unique_skus = list(set(i.sku for i in packer.placed_items))
-        colors = plt.cm.get_cmap('tab20', len(unique_skus))
-        sku_color_map = {sku: colors(i) for i, sku in enumerate(unique_skus)}
-
-        for i in packer.placed_items:
-            ax.bar3d(i.pos[0], i.pos[1], i.pos[2], 
-                     i.current_dims[0], i.current_dims[1], i.current_dims[2], 
-                     color=sku_color_map[i.sku], edgecolor='black', alpha=0.7)
-
-        ax.set_title(f"Utilization: {util:.2f}% | Placed: {len(packer.placed_items)} | Unplaced: {len(packer.unplaced_items)}")
-        ax.set_xlim(0, c['L']); ax.set_ylim(0, c['W']); ax.set_zlim(0, c['H'])
-        plt.show()
+        canvas = FigureCanvasTkAgg(fig, master=frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
 if __name__ == "__main__":
     root = tk.Tk()
-    App(root)
+    ProfessionalApp(root)
     root.mainloop()
